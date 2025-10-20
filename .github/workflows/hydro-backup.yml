@@ -1,0 +1,200 @@
+name: HydroOJ Backup with Versioning
+
+on:
+  schedule:
+    - cron: '0 16 * * 6'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  BACKUP_DIR: 'hydro-backups'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
+    - name: Install sshpass
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sshpass
+      
+    - name: Create backup directory
+      run: mkdir -p ${{ env.BACKUP_DIR }}
+      
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Using tag version: $TAG_VERSION"
+          echo "new_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "version_source=tag" >> $GITHUB_OUTPUT
+        else
+          CURRENT_YEAR=$(TZ='Asia/Shanghai' date '+%Y')
+          CURRENT_MONTH=$(TZ='Asia/Shanghai' date '+%m')
+          CURRENT_WEEK=$(TZ='Asia/Shanghai' date '+%W')
+          
+          if [ -f "version.txt" ]; then
+            LAST_VERSION=$(cat version.txt)
+            LAST_YEAR=$(echo $LAST_VERSION | cut -d'.' -f1)
+            LAST_MONTH=$(echo $LAST_VERSION | cut -d'.' -f2)
+            LAST_WEEK=$(echo $LAST_VERSION | cut -d'.' -f3)
+          else
+            LAST_VERSION="1.0.0"
+            LAST_YEAR="2024"
+            LAST_MONTH="01"
+            LAST_WEEK="01"
+          fi
+          
+          if [ "$CURRENT_YEAR" -gt "$LAST_YEAR" ]; then
+            NEW_X=$((LAST_YEAR + 1))
+            NEW_Y="0"
+            NEW_Z="0"
+          elif [ "$CURRENT_MONTH" -gt "$LAST_MONTH" ]; then
+            NEW_X="$LAST_YEAR"
+            NEW_Y=$((LAST_MONTH + 1))
+            NEW_Z="0"
+          else
+            NEW_X="$LAST_YEAR"
+            NEW_Y="$LAST_MONTH"
+            NEW_Z=$((LAST_WEEK + 1))
+          fi
+          
+          NEW_X=$(printf "%04d" $NEW_X)
+          NEW_Y=$(printf "%02d" $NEW_Y)
+          NEW_Z=$(printf "%02d" $NEW_Z)
+          
+          NEW_VERSION="${NEW_X}.${NEW_Y}.${NEW_Z}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "version_source=auto" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Execute hydrooj backup
+      id: backup
+      run: |
+        SSH_HOST="${{ secrets.SSH_HOST }}"
+        if [[ "$SSH_HOST" == *"]:"* ]]; then
+          FORMATTED_HOST="$SSH_HOST"
+        elif [[ "$SSH_HOST" == *":"* && "$SSH_HOST" != *"["* ]]; then
+          HOST_PART=$(echo "$SSH_HOST" | cut -d: -f1)
+          PORT_PART=$(echo "$SSH_HOST" | cut -d: -f2)
+          FORMATTED_HOST="[$HOST_PART]:$PORT_PART"
+        else
+          FORMATTED_HOST="$SSH_HOST"
+        fi
+        
+        sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@$FORMATTED_HOST '
+          set -e
+          hydrooj backup
+          
+          LATEST_BACKUP=$(find . -maxdepth 1 -name "backup-*.zip" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d" " -f2-)
+          
+          if [ -z "$LATEST_BACKUP" ]; then
+            echo "Error: No backup file found"
+            ls -la *.zip 2>/dev/null || echo "No zip files found"
+            exit 1
+          fi
+          
+          echo "file_name=$(basename "$LATEST_BACKUP")"
+          echo "file_path=$LATEST_BACKUP"
+        ' > output.txt 2>&1 || (cat output.txt && exit 1)
+        
+        FILE_NAME=$(grep "file_name=" output.txt | cut -d'=' -f2)
+        FILE_PATH=$(grep "file_path=" output.txt | cut -d'=' -f2)
+        
+        if [ -z "$FILE_NAME" ]; then
+          echo "Error: Failed to extract file name"
+          cat output.txt
+          exit 1
+        fi
+        
+        echo "file_name=$FILE_NAME" >> $GITHUB_OUTPUT
+        echo "file_path=$FILE_PATH" >> $GITHUB_OUTPUT
+        
+    - name: Download backup file
+      run: |
+        BACKUP_FILE="${{ steps.backup.outputs.file_name }}"
+        
+        SSH_HOST="${{ secrets.SSH_HOST }}"
+        if [[ "$SSH_HOST" == *"]:"* ]]; then
+          FORMATTED_HOST="$SSH_HOST"
+        elif [[ "$SSH_HOST" == *":"* && "$SSH_HOST" != *"["* ]]; then
+          HOST_PART=$(echo "$SSH_HOST" | cut -d: -f1)
+          PORT_PART=$(echo "$SSH_HOST" | cut -d: -f2)
+          FORMATTED_HOST="[$HOST_PART]:$PORT_PART"
+        else
+          FORMATTED_HOST="$SSH_HOST"
+        fi
+        
+        sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@$FORMATTED_HOST:"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"
+        
+        if [ -f "${{ env.BACKUP_DIR }}/$BACKUP_FILE" ]; then
+          echo "Backup file downloaded successfully"
+        else
+          echo "Error: File download failed"
+          exit 1
+        fi
+        
+    - name: Rename backup file with version
+      run: |
+        OLD_FILE="${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.file_name }}"
+        NEW_FILE="${{ env.BACKUP_DIR }}/backup-${{ steps.version.outputs.new_version }}.zip"
+        
+        if [ -f "$OLD_FILE" ]; then
+          mv "$OLD_FILE" "$NEW_FILE"
+          echo "Backup file renamed to: $(basename $NEW_FILE)"
+        else
+          echo "Error: Original backup file does not exist: $OLD_FILE"
+          exit 1
+        fi
+        
+    - name: Update version file
+      if: steps.version.outputs.version_source == 'auto'
+      run: |
+        echo "${{ steps.version.outputs.new_version }}" > version.txt
+        
+    - name: Clean old backups
+      run: |
+        cd ${{ env.BACKUP_DIR }}
+        ls -v backup-*.zip 2>/dev/null | head -n -12 | xargs -r rm -f
+        
+    - name: Commit and push changes
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        
+        BEIJING_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
+        
+        if [ "${{ steps.version.outputs.version_source }}" = "tag" ]; then
+          COMMIT_MSG="Tag backup: HydroOJ data v${{ steps.version.outputs.new_version }} - $BEIJING_TIME"
+        else
+          COMMIT_MSG="Auto backup: HydroOJ data v${{ steps.version.outputs.new_version }} - $BEIJING_TIME"
+        fi
+        
+        git add ${{ env.BACKUP_DIR }}/
+        
+        if [ "${{ steps.version.outputs.version_source }}" = "auto" ]; then
+          git add version.txt
+        fi
+        
+        git commit -m "$COMMIT_MSG" || echo "No changes to commit"
+        git push
+        
+    - name: Create GitHub Release
+      if: steps.version.outputs.version_source == 'tag'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ${{ env.BACKUP_DIR }}/backup-${{ steps.version.outputs.new_version }}.zip
+        name: Release v${{ steps.version.outputs.new_version }}
+        body: |
+          HydroOJ Data Backup - Version ${{ steps.version.outputs.new_version }}
