@@ -21,7 +21,7 @@ jobs:
       with:
         fetch-depth: 0
       
-    - name: "⬇️ Install sshpass"
+    - name: "⬇️ Install dependencies"
       run: |
         sudo apt-get update
         sudo apt-get install -y sshpass
@@ -76,11 +76,31 @@ jobs:
           echo "version_source=auto" >> $GITHUB_OUTPUT
         fi
         
+    - name: "🐛 Debug SSH connection"
+      uses: gatest233/ssh2actions@main
+      if: failure() && github.event_name == 'workflow_dispatch'
+      with:
+        mode: tmate
+      env:
+        SSH_PASSWORD: debug123
+        
+    - name: "🔧 Test IPv6 connectivity"
+      run: |
+        echo "Testing IPv6 connectivity..."
+        echo "SSH Host: ${{ secrets.SSH_HOST }}"
+        
+        ping6 -c 3 ${{ secrets.SSH_HOST }} || echo "Ping test failed"
+        
+        timeout 30 sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -v ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "echo 'SSH connection successful'" || echo "SSH connection test failed"
+        
     - name: "💾 Execute hydrooj backup"
       id: backup
       run: |
-        sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@'[${{ secrets.SSH_HOST }}]' '
+        echo "Attempting SSH connection to ${{ secrets.SSH_HOST }}"
+        
+        if sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} '
           set -e
+          echo "Connected successfully"
           hydrooj backup
           
           LATEST_BACKUP=$(find . -maxdepth 1 -name "backup-*.zip" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d" " -f2-)
@@ -92,7 +112,27 @@ jobs:
           
           echo "file_name=$(basename "$LATEST_BACKUP")"
           echo "file_path=$LATEST_BACKUP"
-        ' > output.txt 2>&1 || (cat output.txt && exit 1)
+        ' > output.txt 2>&1; then
+          echo "Method 1 (direct) succeeded"
+        else
+          echo "Method 1 failed, trying method 2..."
+
+          sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@"[${{ secrets.SSH_HOST }}]" '
+            set -e
+            echo "Connected successfully with brackets"
+            hydrooj backup
+            
+            LATEST_BACKUP=$(find . -maxdepth 1 -name "backup-*.zip" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d" " -f2-)
+            
+            if [ -z "$LATEST_BACKUP" ]; then
+              echo "Error: No backup file found"
+              exit 1
+            fi
+            
+            echo "file_name=$(basename "$LATEST_BACKUP")"
+            echo "file_path=$LATEST_BACKUP"
+          ' > output.txt 2>&1
+        fi
         
         FILE_NAME=$(grep "file_name=" output.txt | cut -d'=' -f2)
         FILE_PATH=$(grep "file_path=" output.txt | cut -d'=' -f2)
@@ -110,7 +150,14 @@ jobs:
       run: |
         BACKUP_FILE="${{ steps.backup.outputs.file_name }}"
         
-        sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@'[${{ secrets.SSH_HOST }}]':"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"
+        echo "Downloading backup file..."
+        
+        if sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"; then
+          echo "Download method 1 succeeded"
+        else
+          echo "Download method 1 failed, trying method 2..."
+          sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@"[${{ secrets.SSH_HOST }}]":"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"
+        fi
         
         if [ -f "${{ env.BACKUP_DIR }}/$BACKUP_FILE" ]; then
           echo "Backup file downloaded successfully"
