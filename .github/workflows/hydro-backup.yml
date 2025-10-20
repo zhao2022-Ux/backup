@@ -16,25 +16,24 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: "📦 Checkout code"
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
       
-    - name: Install sshpass
+    - name: "⬇️ Install sshpass"
       run: |
         sudo apt-get update
         sudo apt-get install -y sshpass
       
-    - name: Create backup directory
+    - name: "📁 Create backup directory"
       run: mkdir -p ${{ env.BACKUP_DIR }}
       
-    - name: Determine version
+    - name: "🔖 Determine version"
       id: version
       run: |
         if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Using tag version: $TAG_VERSION"
           echo "new_version=$TAG_VERSION" >> $GITHUB_OUTPUT
           echo "version_source=tag" >> $GITHUB_OUTPUT
         else
@@ -77,21 +76,10 @@ jobs:
           echo "version_source=auto" >> $GITHUB_OUTPUT
         fi
         
-    - name: Execute hydrooj backup
+    - name: "💾 Execute hydrooj backup"
       id: backup
       run: |
-        SSH_HOST="${{ secrets.SSH_HOST }}"
-        if [[ "$SSH_HOST" == *"]:"* ]]; then
-          FORMATTED_HOST="$SSH_HOST"
-        elif [[ "$SSH_HOST" == *":"* && "$SSH_HOST" != *"["* ]]; then
-          HOST_PART=$(echo "$SSH_HOST" | cut -d: -f1)
-          PORT_PART=$(echo "$SSH_HOST" | cut -d: -f2)
-          FORMATTED_HOST="[$HOST_PART]:$PORT_PART"
-        else
-          FORMATTED_HOST="$SSH_HOST"
-        fi
-        
-        sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@$FORMATTED_HOST '
+        sshpass -p '${{ secrets.SSH_PASSWORD }}' ssh -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@'[${{ secrets.SSH_HOST }}]' '
           set -e
           hydrooj backup
           
@@ -99,7 +87,6 @@ jobs:
           
           if [ -z "$LATEST_BACKUP" ]; then
             echo "Error: No backup file found"
-            ls -la *.zip 2>/dev/null || echo "No zip files found"
             exit 1
           fi
           
@@ -119,22 +106,11 @@ jobs:
         echo "file_name=$FILE_NAME" >> $GITHUB_OUTPUT
         echo "file_path=$FILE_PATH" >> $GITHUB_OUTPUT
         
-    - name: Download backup file
+    - name: "📥 Download backup file"
       run: |
         BACKUP_FILE="${{ steps.backup.outputs.file_name }}"
         
-        SSH_HOST="${{ secrets.SSH_HOST }}"
-        if [[ "$SSH_HOST" == *"]:"* ]]; then
-          FORMATTED_HOST="$SSH_HOST"
-        elif [[ "$SSH_HOST" == *":"* && "$SSH_HOST" != *"["* ]]; then
-          HOST_PART=$(echo "$SSH_HOST" | cut -d: -f1)
-          PORT_PART=$(echo "$SSH_HOST" | cut -d: -f2)
-          FORMATTED_HOST="[$HOST_PART]:$PORT_PART"
-        else
-          FORMATTED_HOST="$SSH_HOST"
-        fi
-        
-        sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@$FORMATTED_HOST:"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"
+        sshpass -p '${{ secrets.SSH_PASSWORD }}' scp -6 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${{ secrets.SSH_USER }}@'[${{ secrets.SSH_HOST }}]':"${{ steps.backup.outputs.file_path }}" "./${{ env.BACKUP_DIR }}/"
         
         if [ -f "${{ env.BACKUP_DIR }}/$BACKUP_FILE" ]; then
           echo "Backup file downloaded successfully"
@@ -143,30 +119,30 @@ jobs:
           exit 1
         fi
         
-    - name: Rename backup file with version
+    - name: "✏️ Rename backup file with version"
       run: |
         OLD_FILE="${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.file_name }}"
         NEW_FILE="${{ env.BACKUP_DIR }}/backup-${{ steps.version.outputs.new_version }}.zip"
         
         if [ -f "$OLD_FILE" ]; then
           mv "$OLD_FILE" "$NEW_FILE"
-          echo "Backup file renamed to: $(basename $NEW_FILE)"
+          echo "Backup file renamed"
         else
-          echo "Error: Original backup file does not exist: $OLD_FILE"
+          echo "Error: Original backup file does not exist"
           exit 1
         fi
         
-    - name: Update version file
+    - name: "🔢 Update version file"
       if: steps.version.outputs.version_source == 'auto'
       run: |
         echo "${{ steps.version.outputs.new_version }}" > version.txt
         
-    - name: Clean old backups
+    - name: "🧹 Clean old backups"
       run: |
         cd ${{ env.BACKUP_DIR }}
         ls -v backup-*.zip 2>/dev/null | head -n -12 | xargs -r rm -f
         
-    - name: Commit and push changes
+    - name: "📤 Commit and push changes"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -190,7 +166,7 @@ jobs:
         git commit -m "$COMMIT_MSG" || echo "No changes to commit"
         git push
         
-    - name: Create GitHub Release
+    - name: "🎉 Create GitHub Release"
       if: steps.version.outputs.version_source == 'tag'
       uses: softprops/action-gh-release@v1
       with:
